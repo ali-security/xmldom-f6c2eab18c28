@@ -971,6 +971,19 @@ Document.prototype = {
 		node.appendData(data)
 		return node;
 	},
+	/**
+	 * @param {string} data
+	 * @returns {Comment}
+	 * @see https://dom.spec.whatwg.org/#dom-document-createcomment
+	 * @see https://www.w3.org/TR/xml/#NT-Comment XML 1.0 production [15]
+	 * @see https://www.w3.org/TR/DOM-Parsing/#dfn-concept-serialize-xml §3.2.1.3
+	 *
+	 *      Note: no validation is performed at creation time. When the resulting document is
+	 *      serialized with `requireWellFormed: true`, the serializer throws `InvalidStateError`
+	 *      if the comment data contains `--` anywhere, ends with `-`, or contains characters
+	 *      outside the XML Char production (W3C DOM Parsing §3.2.1.3). Without that option the
+	 *      data is emitted verbatim.
+	 */
 	createComment :	function(data){
 		var node = new Comment();
 		node.ownerDocument = this;
@@ -1283,8 +1296,9 @@ function XMLSerializer(){}
  * When `true`, throws for content that would produce ill-formed XML.
  * @returns {string}
  * @throws {DOMException}
- * With code `INVALID_STATE_ERR` when `requireWellFormed` is `true` and the CDATASection
- * data contains `"]]>"`.
+ * With code `INVALID_STATE_ERR` when `requireWellFormed` is `true` and any of the following
+ * conditions hold: CDATASection data contains `"]]>"`; a Comment node's data contains `--`
+ * anywhere, ends with `-`, or contains characters outside the XML Char production.
  * @see https://html.spec.whatwg.org/#dom-xmlserializer-serializetostring
  * @see https://github.com/w3c/DOM-Parsing/issues/84
  */
@@ -1372,6 +1386,15 @@ function addSerializedAttribute(buf, qualifiedName, value) {
 	value = value == null ? '' : String(value);
 	buf.push(' ', qualifiedName, '="', value.replace(/[<&"]/g,_xmlEncoder), '"')
 }
+
+/**
+ * Matches any character that is not a valid XML 1.0 Char.
+ * `[2] Char ::= #x9 | #xA | #xD | [#x20-#xD7FF] | [#xE000-#xFFFD] | [#x10000-#x10FFFF]`
+ * Characters above #xFFFF are UTF-16 surrogate pairs (there is no RegExp `u` flag in ES5),
+ * so only unpaired surrogates are matched.
+ * @see https://www.w3.org/TR/xml/#NT-Char
+ */
+var InvalidChar = /[\x00-\x08\x0B\x0C\x0E-\x1F\uFFFE\uFFFF]|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?:^|[^\uD800-\uDBFF])[\uDC00-\uDFFF]/;
 
 function serializeToString(node,buf,isHTML,nodeFilter,visibleNamespaces,requireWellFormed){
 	if(nodeFilter){
@@ -1471,6 +1494,14 @@ function serializeToString(node,buf,isHTML,nodeFilter,visibleNamespaces,requireW
 		}
 		return buf.push( '<![CDATA[',node.data.replace(/]]>/g, ']]]]><![CDATA[>'),']]>');
 	case COMMENT_NODE:
+		if (requireWellFormed) {
+			if (InvalidChar.test(node.data)) {
+				throw new DOMException(INVALID_STATE_ERR, 'The comment node data contains characters outside the XML Char production');
+			}
+			if (node.data.indexOf('--') !== -1 || node.data[node.data.length - 1] === '-') {
+				throw new DOMException(INVALID_STATE_ERR, 'The comment node data contains "--" or ends with "-"');
+			}
+		}
 		return buf.push( "<!--",node.data,"-->");
 	case DOCUMENT_TYPE_NODE:
 		var pubid = node.publicId;
