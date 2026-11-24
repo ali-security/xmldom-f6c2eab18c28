@@ -74,6 +74,7 @@ test/parse/locator.js
 test/parse/multiple-root.js
 test/parse/namespace.js
 test/parse/node.js
+test/parse/normalize-complexity.js
 test/parse/parse-element.js
 test/parse/prototype-pollution.js
 test/parse/simple.js|simple

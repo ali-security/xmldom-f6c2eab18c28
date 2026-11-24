@@ -458,14 +458,51 @@ Node.prototype = {
 			enter:function(node){
 				// Merge adjacent text children of node before walkDOM schedules them.
 				var child = node.firstChild;
+				var merged = false;
 				while(child){
 					var next = child.nextSibling;
 					if(next && next.nodeType == TEXT_NODE && child.nodeType == TEXT_NODE){
-						node.removeChild(next);
-						child.appendData(next.data);
+						// Merge the whole run of adjacent text nodes at once: gather the
+						// following text siblings' data, unlink them in a single pass, and
+						// re-index the child list a single time (after the loop). Per-sibling `removeChild`
+						// (each an O(K) re-index) plus per-sibling `appendData` (each an O(K)
+						// string rebuild) is O(K^2) over a long run of single-character text
+						// nodes; this keeps it O(K). The first text node of the run survives
+						// and carries the concatenated data, preserving node identity and
+						// locator semantics.
+						// https://github.com/xmldom/xmldom/security/advisories/GHSA-93r5-fhx6-vmg9
+						var tail = [];
+						var sibling = next;
+						while(sibling && sibling.nodeType == TEXT_NODE){
+							tail.push(sibling.data);
+							sibling = sibling.nextSibling;
+						}
+						// `sibling` is now the first non-text node after the run, or null.
+						var removed = next;
+						while(removed !== sibling){
+							var following = removed.nextSibling;
+							removed.parentNode = null;
+							removed.previousSibling = null;
+							removed.nextSibling = null;
+							removed = following;
+						}
+						child.nextSibling = sibling;
+						if(sibling){
+							sibling.previousSibling = child;
+						}else{
+							node.lastChild = child;
+						}
+						child.appendData(tail.join('')); // single O(K) string rebuild
+						merged = true;
+						child = sibling;
 					}else{
 						child = next;
 					}
+				}
+				if(merged){
+					// Single O(K) re-index of the child list for all the runs merged above: one
+					// re-index per run would still be O(K^2) for many short runs split by other nodes.
+					_onUpdateChild(node.ownerDocument,node);
 				}
 				return true; // descend into surviving children
 			}
@@ -665,12 +702,20 @@ function _onUpdateChild(doc,el,newChild){
 			//console.log(1)
 			var child = el.firstChild;
 			var i = 0;
+			var previousLength = cs.length;
 			while(child){
 				cs[i++] = child;
 				child =child.nextSibling;
 			}
 			cs.length = i;
 			delete cs[cs.length];
+			// normalize() unlinks whole runs of text nodes before a single re-index, so the
+			// list can shrink by more than one: clear every index past the new length. They are
+			// overwritten rather than deleted: deleting the indices of a large list one by one
+			// re-checks its sparseness on each delete in older V8, which is quadratic again.
+			while(++i < previousLength){
+				cs[i] = undefined;
+			}
 		}
 	}
 }
