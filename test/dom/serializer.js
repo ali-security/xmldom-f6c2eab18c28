@@ -11,6 +11,7 @@ var DOMImplementation = require('xmldom/dom').DOMImplementation;
 
 // the code is a literal so the vows report the missing check (and not a
 // TypeError) when DOMException is not exported
+var INVALID_CHARACTER_ERR = 5;
 var INVALID_STATE_ERR = 11;
 
 // GHSA-j759-j44w-7fr8 proof of concept: closes the comment and injects an element
@@ -28,6 +29,10 @@ var ATTRIBUTE_NAME_PAYLOAD = 'class="safe" onclick';
 
 // GHSA-w2rr-34g9-rvrj proof of concept: the element name injects attributes into the start tag
 var ELEMENT_NAME_PAYLOAD = 'img src=x onerror="alert(1)"';
+
+// CVE-2026-83610 proof of concept: the entity reference name closes the reference and
+// injects an element
+var ENTITY_REFERENCE_NAME_PAYLOAD = 'amp;<injected/>&amp';
 
 function createRootDocument() {
   return new DOMImplementation().createDocument(null, 'root', null);
@@ -909,7 +914,125 @@ wows.describe('XML Serializer').addBatch({
     assert.strictEqual(new XMLSerializer().serializeToString(doc, false, null, null),
       '<root class="safe" onclick="alert(1)"/>');
   }
+}).addBatch({
+  // CVE-2026-83610: the EntityReference nodeName was serialized as is between "&" and ";",
+  // even with requireWellFormed: true, so a crafted name could inject markup.
+  'default: EntityReference serializes as &name;': function() {
+    var doc = new DOMImplementation().createDocument(null, '');
+    var entityRef = doc.createEntityReference('amp');
+    assert.strictEqual(new XMLSerializer().serializeToString(entityRef), '&amp;');
+  },
+  'requireWellFormed: true on valid EntityReference serializes as &name;': function() {
+    var doc = new DOMImplementation().createDocument(null, '');
+    var entityRef = doc.createEntityReference('amp');
+    assert.strictEqual(new XMLSerializer().serializeToString(entityRef, false, null, { requireWellFormed: true }), '&amp;');
+  },
+  'default: EntityReference with ill-formed nodeName emits verbatim - no throw': function() {
+    var doc = new DOMImplementation().createDocument(null, '');
+    var entityRef = doc.createEntityReference('safe');
+    // bypass the creation time check through a direct nodeName write
+    entityRef.nodeName = 'safe; <injected/> &x';
+    assert.strictEqual(new XMLSerializer().serializeToString(entityRef), '&safe; <injected/> &x;');
+  },
+  'requireWellFormed: true on EntityReference with ill-formed nodeName throws InvalidStateError': function() {
+    var doc = new DOMImplementation().createDocument(null, '');
+    var entityRef = doc.createEntityReference('safe');
+    entityRef.nodeName = 'safe; <injected/> &x';
+    assertThrowsDOMException(INVALID_STATE_ERR, function() {
+      new XMLSerializer().serializeToString(entityRef, false, null, { requireWellFormed: true });
+    });
+  },
+  'round-trip: valid EntityReference serializes to &name; and re-parses': function() {
+    var doc = new DOMImplementation().createDocument(null, 'root');
+    var entityRef = doc.createEntityReference('amp');
+    var serialized = new XMLSerializer().serializeToString(entityRef, false, null, { requireWellFormed: true });
+    assert.strictEqual(serialized, '&amp;');
+    var reparsed = new DOMParser().parseFromString('<root>' + serialized + '</root>', 'text/xml');
+    assert.strictEqual(reparsed.documentElement.textContent, '&');
+  }
+}).addBatch({
+  // the injection vectors: the crafted name is emitted as live markup by default and is
+  // rejected with requireWellFormed: true
+  'entity reference PoC: injected element survives a default round-trip': function() {
+    var doc = createRootDocument();
+    var entityRef = doc.createEntityReference('amp');
+    doc.documentElement.appendChild(entityRef);
+    entityRef.nodeName = ENTITY_REFERENCE_NAME_PAYLOAD;
+    assert.strictEqual(new XMLSerializer().serializeToString(doc), '<root>&amp;<injected/>&amp;</root>');
+    assert.strictEqual(isInjected(doc.documentElement), true);
+  },
+  'entity reference PoC: createEntityReference payload throws InvalidCharacterError': function() {
+    var doc = createRootDocument();
+    assertThrowsDOMException(INVALID_CHARACTER_ERR, function() {
+      doc.createEntityReference(ENTITY_REFERENCE_NAME_PAYLOAD);
+    });
+  },
+  'nodeName assignment payload in a document throws with requireWellFormed: true': function() {
+    var doc = createRootDocument();
+    var entityRef = doc.createEntityReference('amp');
+    doc.documentElement.appendChild(entityRef);
+    entityRef.nodeName = ENTITY_REFERENCE_NAME_PAYLOAD;
+    assertEntityReferenceRejected(doc);
+  },
+  'payload in a nested EntityReference throws with requireWellFormed: true': function() {
+    var doc = createRootDocument();
+    var child = doc.createElement('child');
+    doc.documentElement.appendChild(child);
+    var entityRef = doc.createEntityReference('amp');
+    child.appendChild(entityRef);
+    entityRef.nodeName = ENTITY_REFERENCE_NAME_PAYLOAD;
+    assertEntityReferenceRejected(doc);
+  },
+  'node.toString and NodeList.toString with requireWellFormed: true on an EntityReference payload throw': function() {
+    var doc = createRootDocument();
+    var entityRef = doc.createEntityReference('amp');
+    doc.documentElement.appendChild(entityRef);
+    entityRef.nodeName = ENTITY_REFERENCE_NAME_PAYLOAD;
+    assertThrowsDOMException(INVALID_STATE_ERR, function() {
+      doc.toString(false, null, { requireWellFormed: true });
+    });
+    assertThrowsDOMException(INVALID_STATE_ERR, function() {
+      entityRef.toString(false, null, { requireWellFormed: true });
+    });
+    assertThrowsDOMException(INVALID_STATE_ERR, function() {
+      doc.documentElement.childNodes.toString(false, null, { requireWellFormed: true });
+    });
+  },
+  'requireWellFormed: true on EntityReference names that are not XML Names throws': function() {
+    var names = ['', 'a b', '1a', 'a;b', 'a' + String.fromCharCode(0x0A)];
+    for (var i = 0; i < names.length; i++) {
+      var doc = createRootDocument();
+      var entityRef = doc.createEntityReference('amp');
+      doc.documentElement.appendChild(entityRef);
+      entityRef.nodeName = names[i];
+      assertEntityReferenceRejected(doc);
+    }
+  },
+  'requireWellFormed: true accepts EntityReferences with valid names in a document': function() {
+    var doc = createRootDocument();
+    doc.documentElement.appendChild(doc.createEntityReference('amp'));
+    doc.documentElement.appendChild(doc.createEntityReference('_x-1.y'));
+    assert.strictEqual(new XMLSerializer().serializeToString(doc, false, null, { requireWellFormed: true }),
+      '<root>&amp;&_x-1.y;</root>');
+  },
+  'requireWellFormed: false keeps the verbatim EntityReference output': function() {
+    var doc = createRootDocument();
+    var entityRef = doc.createEntityReference('amp');
+    doc.documentElement.appendChild(entityRef);
+    entityRef.nodeName = ENTITY_REFERENCE_NAME_PAYLOAD;
+    assert.strictEqual(new XMLSerializer().serializeToString(doc, false, null, { requireWellFormed: false }),
+      '<root>&amp;<injected/>&amp;</root>');
+    assert.strictEqual(new XMLSerializer().serializeToString(doc, false, null, null),
+      '<root>&amp;<injected/>&amp;</root>');
+  }
 }).run();
+
+// Serializing `doc` with requireWellFormed throws, so the EntityReference payload never reaches the output.
+function assertEntityReferenceRejected(doc) {
+  assertThrowsDOMException(INVALID_STATE_ERR, function() {
+    new XMLSerializer().serializeToString(doc, false, null, { requireWellFormed: true });
+  });
+}
 
 // Serializing `doc` with requireWellFormed throws, so the crafted element or attribute name never reaches the output.
 function assertNameRejected(doc) {

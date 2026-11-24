@@ -14,6 +14,7 @@ var DOMException = dom.DOMException;
 // the codes are literals so the vows report the missing check (and not a
 // TypeError) when DOMException is not exported
 var HIERARCHY_REQUEST_ERR = 3;
+var INVALID_CHARACTER_ERR = 5;
 var NOT_FOUND_ERR = 8;
 
 function assertThrowsDOMException(code, fn) {
@@ -303,5 +304,39 @@ vows.describe('Document pre-insertion validity').addBatch({
 		assert.strictEqual(initialElement.nextSibling, null);
 		assert.strictEqual(initialElement.previousSibling, null);
 		assert.strictEqual(doc.childNodes.length, 1);
+	}
+}).addBatch({
+	// CVE-2026-83610: createEntityReference accepted any name, and the serializer emits the
+	// name as is between "&" and ";", so a crafted name could inject markup.
+	'createEntityReference creates an EntityReference with a valid name': function () {
+		var doc = new DOMImplementation().createDocument(null, '');
+		var eref = doc.createEntityReference('amp');
+		assert.strictEqual(eref.nodeType, 5);
+		assert.strictEqual(eref.nodeType, doc.ENTITY_REFERENCE_NODE);
+		assert.strictEqual(eref.nodeName, 'amp');
+		assert.strictEqual(eref.ownerDocument, doc);
+		assert.strictEqual(doc.createEntityReference('_x-1.y').nodeName, '_x-1.y');
+	},
+	'createEntityReference throws for a name that is not a valid XML Name': function () {
+		var doc = new DOMImplementation().createDocument(null, '');
+		assertThrowsDOMException(INVALID_CHARACTER_ERR, function () {
+			doc.createEntityReference('123');
+		});
+	},
+	'createEntityReference throws for a name with a valid prefix but ill-formed remainder': function () {
+		var doc = new DOMImplementation().createDocument(null, '');
+		assertThrowsDOMException(INVALID_CHARACTER_ERR, function () {
+			doc.createEntityReference('safe; <injected/> &x');
+		});
+	},
+	'createEntityReference throws for markup injection payloads': function () {
+		var doc = new DOMImplementation().createDocument(null, 'root');
+		var names = ['', 'a b', 'amp;<injected/>&amp', 'lt;--><script>alert(1)</script><!--', 'a' + String.fromCharCode(0x0A)];
+		for (var i = 0; i < names.length; i++) {
+			var name = names[i];
+			assertThrowsDOMException(INVALID_CHARACTER_ERR, function () {
+				doc.createEntityReference(name);
+			});
+		}
 	}
 }).run();

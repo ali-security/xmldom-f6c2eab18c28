@@ -1144,7 +1144,27 @@ Document.prototype = {
 		node.specified = true;
 		return node;
 	},
+	/**
+	 * Creates an EntityReference object, serialized as `&name;`.
+	 *
+	 * The `name` is validated against the XML `Name` production at creation time; an invalid name
+	 * throws a `DOMException` with code `INVALID_CHARACTER_ERR`. When the resulting node is
+	 * serialized with `requireWellFormed: true`, the serializer re-validates `nodeName` and throws
+	 * a `DOMException` with code `INVALID_STATE_ERR` if a later `nodeName` mutation made it invalid;
+	 * without that option the name is emitted verbatim.
+	 *
+	 * Note: xmldom does not expand entities — the parser resolves entity references inline and never
+	 * constructs `EntityReference` nodes, so this method is the only producer.
+	 *
+	 * @param {string} name The name of the entity to reference.
+	 * @returns {EntityReference}
+	 * @throws {DOMException} With code `INVALID_CHARACTER_ERR` when `name` is not a valid XML `Name`.
+	 * @see https://www.w3.org/TR/DOM-Level-3-Core/core.html#ID-392B75AE
+	 */
 	createEntityReference :	function(name){
+		if (!tagNamePattern.test(name)) {
+			throw new DOMException(INVALID_CHARACTER_ERR, 'not a valid xml name "' + name + '"');
+		}
 		var node = new EntityReference();
 		node.ownerDocument	= this;
 		node.nodeName	= name;
@@ -1388,6 +1408,20 @@ function Entity() {
 Entity.prototype.nodeType = ENTITY_NODE;
 _extends(Entity,Node);
 
+/**
+ * Represents an EntityReference node, serialized as `&nodeName;`.
+ *
+ * `nodeName` is the referenced entity's name, stored verbatim. When serialized with
+ * `requireWellFormed: true`, the serializer validates `nodeName` against the XML `Name` production
+ * and throws a `DOMException` with code `INVALID_STATE_ERR` if it does not match; without that
+ * option the name is emitted verbatim between `&` and `;`.
+ *
+ * Note: xmldom does not expand entities — the parser resolves entity references inline and never
+ * constructs `EntityReference` nodes, so the only producer is `Document.createEntityReference`.
+ *
+ * @class
+ * @see https://www.w3.org/TR/xml/#NT-Name
+ */
 function EntityReference() {
 };
 EntityReference.prototype.nodeType = ENTITY_REFERENCE_NODE;
@@ -1439,7 +1473,7 @@ function XMLSerializer(){}
  * production; a DocumentType's `internalSubset` contains `"]>"`; a ProcessingInstruction's
  * `target` contains `:`, is an ASCII case-insensitive match for `"xml"` or is not a valid XML
  * `Name`; a ProcessingInstruction's `data` contains `"?>"` or characters outside the XML Char
- * production.
+ * production; an EntityReference's `nodeName` is not a valid XML `Name` (XML 1.0 production [5]).
  * Note: xmldom does not enforce `readonly` on DocumentType fields — direct property writes
  * succeed and are covered by the serializer-level checks above.
  * @see https://developer.mozilla.org/docs/Web/API/XMLSerializer/serializeToString
@@ -1569,9 +1603,9 @@ var PubidChars_match = /^[\x20\x0D\x0Aa-zA-Z0-9\-'()+,.\/:=?;!*#@$_%]*$/;
 
 /**
  * The XML `Name` pattern the SAX parser uses for tag names (a copy of the one in sax.js),
- * used to validate the DocumentType name, the ProcessingInstruction target and the qualified
- * names of elements and attributes (synthesized `xmlns` declarations included) when
- * `requireWellFormed` is `true`.
+ * used to validate the DocumentType name, the ProcessingInstruction target, the EntityReference
+ * name and the qualified names of elements and attributes (synthesized `xmlns` declarations
+ * included) when `requireWellFormed` is `true`, and the name passed to `createEntityReference`.
  * `[5] Name ::= NameStartChar (NameChar)*`
  * @see https://www.w3.org/TR/xml/#NT-Name
  * @see https://www.w3.org/TR/xml-names/#NT-QName
@@ -1750,6 +1784,9 @@ function serializeToString(node,buf,isHTML,nodeFilter,visibleNamespaces,requireW
 			buf.push( "<?",node.target," ",node.data,"?>");
 			break;
 		case ENTITY_REFERENCE_NODE:
+			if (requireWellFormed && !tagNamePattern.test(node.nodeName)) {
+				throw new DOMException(INVALID_STATE_ERR, 'The entity reference name "' + node.nodeName + '" is not a valid XML Name');
+			}
 			buf.push( '&',node.nodeName,';');
 			break;
 		//case ENTITY_NODE:
