@@ -22,6 +22,13 @@ var DOCTYPE_NAME_PAYLOAD = 'html><script xmlns="http://www.w3.org/1999/xhtml">al
 // GHSA-x6wf-f3px-wcqx proof of concept: closes the processing instruction and injects an element
 var PI_PAYLOAD = '?><injected/><?q ';
 
+// GHSA-4w3w-2rp5-g8jm proof of concept: the attribute name closes the intended attribute
+// and injects an event handler
+var ATTRIBUTE_NAME_PAYLOAD = 'class="safe" onclick';
+
+// GHSA-w2rr-34g9-rvrj proof of concept: the element name injects attributes into the start tag
+var ELEMENT_NAME_PAYLOAD = 'img src=x onerror="alert(1)"';
+
 function createRootDocument() {
   return new DOMImplementation().createDocument(null, 'root', null);
 }
@@ -731,7 +738,185 @@ wows.describe('XML Serializer').addBatch({
     assert.strictEqual(new XMLSerializer().serializeToString(doc, false, null, null),
       '<root><?foo inject?>evil?></root>');
   }
+}).addBatch({
+  // CVE-2026-83607: element names are not validated when the element is created and were
+  // serialized as is, even with requireWellFormed: true, so a crafted name could end the start
+  // tag early and inject attributes or markup.
+  // https://github.com/xmldom/xmldom/security/advisories/GHSA-w2rr-34g9-rvrj
+  'default: element with invalid name emits verbatim - no throw': function() {
+    var doc = createRootDocument();
+    doc.documentElement.appendChild(doc.createElement('x><inject'));
+    assert.strictEqual(new XMLSerializer().serializeToString(doc), '<root><x><inject/></root>');
+  },
+  'requireWellFormed: true on element with invalid name throws InvalidStateError': function() {
+    var doc = createRootDocument();
+    doc.documentElement.appendChild(doc.createElement('x><inject'));
+    assertNameRejected(doc);
+  },
+  'requireWellFormed: true on element with valid name does not throw': function() {
+    var doc = createRootDocument();
+    doc.documentElement.appendChild(doc.createElement('child'));
+    assert.strictEqual(new XMLSerializer().serializeToString(doc, false, null, { requireWellFormed: true }),
+      '<root><child/></root>');
+  }
+}).addBatch({
+  // CVE-2026-83605: Element.setAttribute() does not validate the attribute name and the
+  // serializer emitted it as is, even with requireWellFormed: true, so a crafted name could
+  // close the intended attribute and inject more attributes (event handlers included).
+  // https://github.com/xmldom/xmldom/security/advisories/GHSA-4w3w-2rp5-g8jm
+  'default: attribute with invalid name emits verbatim - no throw': function() {
+    var doc = createRootDocument();
+    doc.documentElement.setAttribute('a><inject ', 'v');
+    assert.strictEqual(new XMLSerializer().serializeToString(doc), '<root a><inject ="v"/>');
+  },
+  'requireWellFormed: true on attribute with invalid name throws InvalidStateError': function() {
+    var doc = createRootDocument();
+    doc.documentElement.setAttribute('a><inject ', 'v');
+    assertNameRejected(doc);
+  },
+  'requireWellFormed: true on attribute with valid name does not throw': function() {
+    var doc = createRootDocument();
+    doc.documentElement.setAttribute('class', 'hello');
+    assert.strictEqual(new XMLSerializer().serializeToString(doc, false, null, { requireWellFormed: true }),
+      '<root class="hello"/>');
+  }
+}).addBatch({
+  // the namespace prefix of an element or attribute is a writable property, and the
+  // synthesized xmlns:PREFIX declaration was emitted with the prefix as is
+  'default: invalid prefix in synthesized xmlns declaration emits verbatim - no throw': function() {
+    var doc = createRootDocument();
+    var el = doc.createElementNS('http://example.com/ns', 'p:child');
+    doc.documentElement.appendChild(el);
+    el.prefix = 'evil>';
+    assert.strictEqual(new XMLSerializer().serializeToString(doc),
+      '<root><p:child xmlns:evil>="http://example.com/ns"/></root>');
+  },
+  'requireWellFormed: true on invalid prefix in synthesized xmlns declaration throws InvalidStateError': function() {
+    var doc = createRootDocument();
+    var el = doc.createElementNS('http://example.com/ns', 'p:child');
+    doc.documentElement.appendChild(el);
+    el.prefix = 'evil>';
+    assertNameRejected(doc);
+  },
+  'requireWellFormed: true on invalid prefix in element qualified name throws InvalidStateError': function() {
+    var doc = createRootDocument();
+    doc.documentElement.appendChild(doc.createElement('evil>:child'));
+    assertNameRejected(doc);
+  },
+  'requireWellFormed: true on element with valid prefix does not throw': function() {
+    var doc = createRootDocument();
+    doc.documentElement.appendChild(doc.createElementNS('http://example.com/ns', 'p:child'));
+    assert.strictEqual(new XMLSerializer().serializeToString(doc, false, null, { requireWellFormed: true }),
+      '<root><p:child xmlns:p="http://example.com/ns"/></root>');
+  }
+}).addBatch({
+  // the advisories' proofs of concept, and the other ways to get a crafted name to the serializer
+  'attribute advisory PoC: injected event handler survives a default round-trip': function() {
+    var doc = createRootDocument();
+    doc.documentElement.setAttribute(ATTRIBUTE_NAME_PAYLOAD, 'alert(1)');
+    var xml = new XMLSerializer().serializeToString(doc);
+    assert.strictEqual(xml, '<root class="safe" onclick="alert(1)"/>');
+    var reparsed = new DOMParser().parseFromString(xml, 'text/xml');
+    assert.strictEqual(reparsed.documentElement.getAttribute('onclick'), 'alert(1)');
+  },
+  'attribute advisory PoC: setAttribute payload throws with requireWellFormed: true': function() {
+    var doc = createRootDocument();
+    doc.documentElement.setAttribute(ATTRIBUTE_NAME_PAYLOAD, 'alert(1)');
+    assertNameRejected(doc);
+  },
+  'element advisory PoC: injected event handler is emitted by default': function() {
+    var doc = createRootDocument();
+    doc.documentElement.appendChild(doc.createElement(ELEMENT_NAME_PAYLOAD));
+    assert.strictEqual(new XMLSerializer().serializeToString(doc), '<root><img src=x onerror="alert(1)"/></root>');
+  },
+  'element advisory PoC: createElement payload throws with requireWellFormed: true': function() {
+    var doc = createRootDocument();
+    doc.documentElement.appendChild(doc.createElement(ELEMENT_NAME_PAYLOAD));
+    assertNameRejected(doc);
+  },
+  'attribute name payload through createAttribute, setAttributeNS and createAttributeNS throws': function() {
+    var doc = createRootDocument();
+    var attr = doc.createAttribute(ATTRIBUTE_NAME_PAYLOAD);
+    attr.value = attr.nodeValue = 'alert(1)';
+    doc.documentElement.setAttributeNode(attr);
+    assertNameRejected(doc);
+
+    doc = createRootDocument();
+    doc.documentElement.setAttributeNS('urn:x', 'p:a="1" onclick', 'alert(1)');
+    assert.strictEqual(new XMLSerializer().serializeToString(doc), '<root xmlns:p="urn:x" p:a="1" onclick="alert(1)"/>');
+    assertNameRejected(doc);
+
+    doc = createRootDocument();
+    attr = doc.createAttributeNS('urn:x', 'p:a><injected/');
+    attr.value = attr.nodeValue = 'v';
+    doc.documentElement.setAttributeNodeNS(attr);
+    assertNameRejected(doc);
+  },
+  'element name payload through createElementNS throws with requireWellFormed: true': function() {
+    var doc = createRootDocument();
+    doc.documentElement.appendChild(doc.createElementNS('urn:x', 'p:x onclick="alert(1)"'));
+    assertNameRejected(doc);
+  },
+  'invalid attribute prefix in synthesized xmlns declaration throws with requireWellFormed: true': function() {
+    var doc = createRootDocument();
+    doc.documentElement.setAttributeNS('urn:x', 'p:a', 'v');
+    doc.documentElement.getAttributeNodeNS('urn:x', 'a').prefix = 'x="1" onclick';
+    assert.strictEqual(new XMLSerializer().serializeToString(doc), '<root xmlns:x="1" onclick="urn:x" p:a="v"/>');
+    assertNameRejected(doc);
+  },
+  'crafted names in nested elements and DocumentFragments throw with requireWellFormed: true': function() {
+    var doc = createRootDocument();
+    var child = doc.createElement('child');
+    doc.documentElement.appendChild(child);
+    var grandchild = doc.createElement('grandchild');
+    child.appendChild(grandchild);
+    grandchild.setAttribute(ATTRIBUTE_NAME_PAYLOAD, 'alert(1)');
+    assertNameRejected(doc);
+
+    var fragment = doc.createDocumentFragment();
+    fragment.appendChild(doc.createElement(ELEMENT_NAME_PAYLOAD));
+    assertThrowsDOMException(INVALID_STATE_ERR, function() {
+      new XMLSerializer().serializeToString(fragment, false, null, { requireWellFormed: true });
+    });
+  },
+  'node.toString and NodeList.toString with requireWellFormed: true on a crafted name throw': function() {
+    var doc = createRootDocument();
+    doc.documentElement.setAttribute(ATTRIBUTE_NAME_PAYLOAD, 'alert(1)');
+    doc.documentElement.appendChild(doc.createElement(ELEMENT_NAME_PAYLOAD));
+    assertThrowsDOMException(INVALID_STATE_ERR, function() {
+      doc.toString(false, null, { requireWellFormed: true });
+    });
+    assertThrowsDOMException(INVALID_STATE_ERR, function() {
+      doc.documentElement.getAttributeNode(ATTRIBUTE_NAME_PAYLOAD).toString(false, null, { requireWellFormed: true });
+    });
+    assertThrowsDOMException(INVALID_STATE_ERR, function() {
+      doc.documentElement.firstChild.toString(false, null, { requireWellFormed: true });
+    });
+    assertThrowsDOMException(INVALID_STATE_ERR, function() {
+      doc.documentElement.childNodes.toString(false, null, { requireWellFormed: true });
+    });
+  },
+  'requireWellFormed: true on a parsed well-formed namespaced document round-trips': function() {
+    var xml = '<root xmlns="urn:a" xmlns:p="urn:p" p:attr="1" xml:lang="en"><p:child _x-1.y="2"/><r\u00E9sum\u00E9/></root>';
+    var doc = new DOMParser().parseFromString(xml, 'text/xml');
+    assert.strictEqual(new XMLSerializer().serializeToString(doc, false, null, { requireWellFormed: true }), xml);
+  },
+  'requireWellFormed: false keeps the verbatim element and attribute names': function() {
+    var doc = createRootDocument();
+    doc.documentElement.setAttribute(ATTRIBUTE_NAME_PAYLOAD, 'alert(1)');
+    assert.strictEqual(new XMLSerializer().serializeToString(doc, false, null, { requireWellFormed: false }),
+      '<root class="safe" onclick="alert(1)"/>');
+    assert.strictEqual(new XMLSerializer().serializeToString(doc, false, null, null),
+      '<root class="safe" onclick="alert(1)"/>');
+  }
 }).run();
+
+// Serializing `doc` with requireWellFormed throws, so the crafted element or attribute name never reaches the output.
+function assertNameRejected(doc) {
+  assertThrowsDOMException(INVALID_STATE_ERR, function() {
+    new XMLSerializer().serializeToString(doc, false, null, { requireWellFormed: true });
+  });
+}
 
 // Serializing `doc` with requireWellFormed throws, so the payload never reaches the output.
 function assertCommentRejected(doc) {

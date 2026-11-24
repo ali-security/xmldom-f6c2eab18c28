@@ -1416,8 +1416,9 @@ function XMLSerializer(){}
  *   at each `]]>` occurrence (following W3C DOM Level 3 Core `split-cdata-sections`
  *   default behaviour) unless `requireWellFormed` is `true`.
  * - W3C DOM Parsing §3.2.1.1 requires well-formedness checks on Element `localName`s,
- *   prefixes, and attribute serialization when `requireWellFormed` is `true`. These checks
- *   are **not implemented** in this release.
+ *   prefixes, and attribute serialization when `requireWellFormed` is `true`. This release
+ *   only checks that the qualified names of elements and attributes (synthesized `xmlns`
+ *   declarations included) are valid XML QNames.
  *
  * @param {Node} node
  * @param {boolean} [isHtml]
@@ -1428,8 +1429,10 @@ function XMLSerializer(){}
  * @returns {string}
  * @throws {DOMException}
  * With code `INVALID_STATE_ERR` when `requireWellFormed` is `true` and any of the following
- * conditions hold: CDATASection data contains `"]]>"`; a Comment node's data contains `--`
- * anywhere, ends with `-`, or contains characters outside the XML Char production; a
+ * conditions hold: an Element's qualified name (including any namespace prefix) is not a valid
+ * XML QName; an attribute's qualified name (including a synthesized `xmlns:` namespace
+ * declaration) is not a valid XML QName; CDATASection data contains `"]]>"`; a Comment node's
+ * data contains `--` anywhere, ends with `-`, or contains characters outside the XML Char production; a
  * DocumentType's `name` is not a valid XML `Name` (XML 1.0 production [5]); a DocumentType's
  * `publicId` is non-empty and does not match the XML `PubidLiteral` production; a
  * DocumentType's `systemId` is non-empty and does not match the XML `SystemLiteral`
@@ -1518,10 +1521,19 @@ function _quoteDoctypeId(id){
 /**
  * Well-formed constraint: No < in Attribute Values
  * The replacement text of any entity referred to directly or indirectly in an attribute value must not contain a <.
+ *
+ * When `requireWellFormed` is `true`, `qualifiedName` has to be a valid XML QName, otherwise
+ * a DOMException with code `INVALID_STATE_ERR` is thrown (the name is not validated when the
+ * attribute is created, and it is emitted as is).
  * @see https://www.w3.org/TR/xml/#CleanAttrVals
  * @see https://www.w3.org/TR/xml/#NT-AttValue
+ * @see https://w3c.github.io/DOM-Parsing/#serializing-an-element-s-attributes
+ * @see https://github.com/xmldom/xmldom/security/advisories/GHSA-4w3w-2rp5-g8jm
  */
-function addSerializedAttribute(buf, qualifiedName, value) {
+function addSerializedAttribute(buf, qualifiedName, value, requireWellFormed) {
+	if (requireWellFormed && !tagNamePattern.test(qualifiedName)) {
+		throw new DOMException(INVALID_STATE_ERR, 'The attribute name "' + qualifiedName + '" is not a valid XML QName');
+	}
 	// a prefix without a namespace URI (lenient parse, createElementNS(null,'p:x'))
 	// serialized as xmlns:p="" before this escaping was added; keep that output
 	value = value == null ? '' : String(value);
@@ -1557,10 +1569,12 @@ var PubidChars_match = /^[\x20\x0D\x0Aa-zA-Z0-9\-'()+,.\/:=?;!*#@$_%]*$/;
 
 /**
  * The XML `Name` pattern the SAX parser uses for tag names (a copy of the one in sax.js),
- * used to validate the DocumentType name and the ProcessingInstruction target when
+ * used to validate the DocumentType name, the ProcessingInstruction target and the qualified
+ * names of elements and attributes (synthesized `xmlns` declarations included) when
  * `requireWellFormed` is `true`.
  * `[5] Name ::= NameStartChar (NameChar)*`
  * @see https://www.w3.org/TR/xml/#NT-Name
+ * @see https://www.w3.org/TR/xml-names/#NT-QName
  */
 var nameStartChar = /[A-Z_a-z\xC0-\xD6\xD8-\xF6\u00F8-\u02FF\u0370-\u037D\u037F-\u1FFF\u200C-\u200D\u2070-\u218F\u2C00-\u2FEF\u3001-\uD7FF\uF900-\uFDCF\uFDF0-\uFFFD]///\u10000-\uEFFFF
 var nameChar = new RegExp("[\\-\\.0-9"+nameStartChar.source.slice(1,-1)+"\\u00B7\\u0300-\\u036F\\u203F-\\u2040]");
@@ -1608,6 +1622,11 @@ function serializeToString(node,buf,isHTML,nodeFilter,visibleNamespaces,requireW
 			var nodeName = node.tagName;
 
 			isHTML =  (htmlns === node.namespaceURI) ||isHTML
+			// the name is not validated when the element is created (or its prefix is changed),
+			// so a ">" or whitespace in it would end the start tag early and inject markup
+			if (requireWellFormed && !tagNamePattern.test(nodeName)) {
+				throw new DOMException(INVALID_STATE_ERR, 'The element name "' + nodeName + '" is not a valid XML QName');
+			}
 			buf.push('<',nodeName);
 
 
@@ -1626,7 +1645,7 @@ function serializeToString(node,buf,isHTML,nodeFilter,visibleNamespaces,requireW
 				if (needNamespaceDefine(attr,isHTML, visibleNamespaces)) {
 					var prefix = attr.prefix||'';
 					var uri = attr.namespaceURI;
-					addSerializedAttribute(buf, prefix ? 'xmlns:' + prefix : "xmlns", uri);
+					addSerializedAttribute(buf, prefix ? 'xmlns:' + prefix : "xmlns", uri, requireWellFormed);
 					visibleNamespaces.push({ prefix: prefix, namespace:uri });
 				}
 				// attributes have no children, so this call does not nest any further
@@ -1636,7 +1655,7 @@ function serializeToString(node,buf,isHTML,nodeFilter,visibleNamespaces,requireW
 			if (needNamespaceDefine(node,isHTML, visibleNamespaces)) {
 				var prefix = node.prefix||'';
 				var uri = node.namespaceURI;
-				addSerializedAttribute(buf, prefix ? 'xmlns:' + prefix : "xmlns", uri);
+				addSerializedAttribute(buf, prefix ? 'xmlns:' + prefix : "xmlns", uri, requireWellFormed);
 				visibleNamespaces.push({ prefix: prefix, namespace:uri });
 			}
 
@@ -1657,7 +1676,7 @@ function serializeToString(node,buf,isHTML,nodeFilter,visibleNamespaces,requireW
 			_pushChildFrames(stack, node, isHTML, visibleNamespaces, false);
 			break;
 		case ATTRIBUTE_NODE:
-			addSerializedAttribute(buf, node.name, node.value);
+			addSerializedAttribute(buf, node.name, node.value, requireWellFormed);
 			break;
 		case TEXT_NODE:
 			buf.push(node.data.replace(/[<&]/g,_xmlEncoder));
