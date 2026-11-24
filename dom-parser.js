@@ -248,4 +248,5 @@ function appendElement (hander,node) {
 	var DOMImplementation = exports.DOMImplementation = require('./dom').DOMImplementation;
 	exports.XMLSerializer = require('./dom').XMLSerializer ;
 	exports.DOMParser = DOMParser;
+	exports.__DOMHandler = DOMHandler;
 //}

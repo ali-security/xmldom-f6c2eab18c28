@@ -964,6 +964,23 @@ function needNamespaceDefine(node,isHTML, visibleNamespaces) {
 	//console.error(3,true,node.flag,node.prefix,node.namespaceURI)
 	return true;
 }
+/**
+ * Quotes the public or system identifier of a DOCTYPE, so that it is always serialized
+ * as exactly one literal and its content can not end up as markup (e.g. an internal subset).
+ * The identifier is delimited by '"', or by "'" when it contains '"'.
+ * A literal can not contain its own delimiter, so when the identifier contains both quotes
+ * every '"' is percent encoded (as in a URI).
+ */
+function _quoteDoctypeId(id){
+	id = String(id);
+	if(id.indexOf('"') < 0){
+		return '"' + id + '"';
+	}
+	if(id.indexOf("'") < 0){
+		return "'" + id + "'";
+	}
+	return '"' + id.replace(/"/g, '%22') + '"';
+}
 function serializeToString(node,buf,isHTML,nodeFilter,visibleNamespaces){
 	if(nodeFilter){
 		node = nodeFilter(node);
@@ -1067,13 +1084,13 @@ function serializeToString(node,buf,isHTML,nodeFilter,visibleNamespaces){
 		var sysid = node.systemId;
 		buf.push('<!DOCTYPE ',node.name);
 		if(pubid){
-			buf.push(' PUBLIC "',pubid);
+			buf.push(' PUBLIC ', _quoteDoctypeId(pubid));
 			if (sysid && sysid!='.') {
-				buf.push( '" "',sysid);
+				buf.push(' ', _quoteDoctypeId(sysid));
 			}
-			buf.push('">');
+			buf.push('>');
 		}else if(sysid && sysid!='.'){
-			buf.push(' SYSTEM "',sysid,'">');
+			buf.push(' SYSTEM ', _quoteDoctypeId(sysid), '>');
 		}else{
 			var sub = node.internalSubset;
 			if(sub){

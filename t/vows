@@ -25,6 +25,8 @@
 #    randomly generated document faster than dom-js); fails intermittently on a
 #    loaded machine, asserts nothing about correctness.
 #  - test/parse/test-define.js: not a test, a helper module with no vows.
+#  - test/get-test-parser.js and test/error/reported.js: helper modules with no
+#    vows, required by the suites that use them.
 #  - test/*/index.js and test/index.js: aggregators that re-require the suite
 #    files already run individually below.
 
@@ -51,8 +53,12 @@ test/dom/fragment.js
 test/dom/level3.js
 test/dom/ns-test.js
 test/dom/serializer.js|<script> element with no children
+test/error/duplicate-attribute.js
 test/error/error.js
+test/error/parse-error.js
+test/error/reported-levels.js
 test/error/xml-error.js|invalid xml attribute(<>&)
+test/parse/doctype.js
 test/parse/file-test.js
 test/parse/locator.js
 test/parse/namespace.js

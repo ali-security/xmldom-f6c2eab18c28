@@ -1,3 +1,4 @@
+require('./doctype')
 require('./file-test')
 require('./locator')
 require('./namespace')
