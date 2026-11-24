@@ -1108,6 +1108,26 @@ Document.prototype = {
 		node.appendData(data)
 		return node;
 	},
+	/**
+	 * Returns a ProcessingInstruction node whose target is target and data is data.
+	 *
+	 * __This implementation differs from the specification:__
+	 * - it does not do any input validation on the arguments and doesn't throw
+	 * "InvalidCharacterError".
+	 *
+	 * Note: When the resulting document is serialized with `requireWellFormed: true`, the
+	 * serializer throws `InvalidStateError` if `.target` contains `:`, is an ASCII
+	 * case-insensitive match for `"xml"` or is not a valid XML `Name`, or if `.data` contains
+	 * `?>` or characters outside the XML Char production (W3C DOM Parsing §3.2.1.7). Without
+	 * that option the data is emitted verbatim.
+	 *
+	 * @param {string} target
+	 * @param {string} data
+	 * @returns {ProcessingInstruction}
+	 * @see https://developer.mozilla.org/docs/Web/API/Document/createProcessingInstruction
+	 * @see https://dom.spec.whatwg.org/#dom-document-createprocessinginstruction
+	 * @see https://www.w3.org/TR/DOM-Parsing/#dfn-concept-serialize-xml §3.2.1.7
+	 */
 	createProcessingInstruction :	function(target,data){
 		var node = new ProcessingInstruction();
 		node.ownerDocument = this;
@@ -1413,9 +1433,13 @@ function XMLSerializer(){}
  * DocumentType's `name` is not a valid XML `Name` (XML 1.0 production [5]); a DocumentType's
  * `publicId` is non-empty and does not match the XML `PubidLiteral` production; a
  * DocumentType's `systemId` is non-empty and does not match the XML `SystemLiteral`
- * production; a DocumentType's `internalSubset` contains `"]>"`.
+ * production; a DocumentType's `internalSubset` contains `"]>"`; a ProcessingInstruction's
+ * `target` contains `:`, is an ASCII case-insensitive match for `"xml"` or is not a valid XML
+ * `Name`; a ProcessingInstruction's `data` contains `"?>"` or characters outside the XML Char
+ * production.
  * Note: xmldom does not enforce `readonly` on DocumentType fields — direct property writes
  * succeed and are covered by the serializer-level checks above.
+ * @see https://developer.mozilla.org/docs/Web/API/XMLSerializer/serializeToString
  * @see https://html.spec.whatwg.org/#dom-xmlserializer-serializetostring
  * @see https://github.com/w3c/DOM-Parsing/issues/84
  */
@@ -1533,7 +1557,8 @@ var PubidChars_match = /^[\x20\x0D\x0Aa-zA-Z0-9\-'()+,.\/:=?;!*#@$_%]*$/;
 
 /**
  * The XML `Name` pattern the SAX parser uses for tag names (a copy of the one in sax.js),
- * used to validate the DocumentType name when `requireWellFormed` is `true`.
+ * used to validate the DocumentType name and the ProcessingInstruction target when
+ * `requireWellFormed` is `true`.
  * `[5] Name ::= NameStartChar (NameChar)*`
  * @see https://www.w3.org/TR/xml/#NT-Name
  */
@@ -1689,6 +1714,20 @@ function serializeToString(node,buf,isHTML,nodeFilter,visibleNamespaces,requireW
 			}
 			break;
 		case PROCESSING_INSTRUCTION_NODE:
+			if (requireWellFormed) {
+				// the target is not validated when the node is created (or later assigned),
+				// so it is also checked against the XML Name production here: a "?>" in it
+				// would close the processing instruction early, like one in the data
+				if (node.target.indexOf(':') !== -1 || node.target.toLowerCase() === 'xml' || !tagNamePattern.test(node.target)) {
+					throw new DOMException(INVALID_STATE_ERR, 'The ProcessingInstruction target is not well-formed');
+				}
+				if (InvalidChar.test(node.data)) {
+					throw new DOMException(INVALID_STATE_ERR, 'The ProcessingInstruction data contains characters outside the XML Char production');
+				}
+				if (node.data.indexOf('?>') !== -1) {
+					throw new DOMException(INVALID_STATE_ERR, 'The ProcessingInstruction data contains "?>"');
+				}
+			}
 			buf.push( "<?",node.target," ",node.data,"?>");
 			break;
 		case ENTITY_REFERENCE_NODE:
