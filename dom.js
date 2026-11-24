@@ -981,6 +981,19 @@ function _quoteDoctypeId(id){
 	}
 	return '"' + id.replace(/"/g, '%22') + '"';
 }
+/**
+ * Well-formed constraint: No < in Attribute Values
+ * The replacement text of any entity referred to directly or indirectly in an attribute value must not contain a <.
+ * @see https://www.w3.org/TR/xml/#CleanAttrVals
+ * @see https://www.w3.org/TR/xml/#NT-AttValue
+ */
+function addSerializedAttribute(buf, qualifiedName, value) {
+	// a prefix without a namespace URI (lenient parse, createElementNS(null,'p:x'))
+	// serialized as xmlns:p="" before this escaping was added; keep that output
+	value = value == null ? '' : String(value);
+	buf.push(' ', qualifiedName, '="', value.replace(/[<&"]/g,_xmlEncoder), '"')
+}
+
 function serializeToString(node,buf,isHTML,nodeFilter,visibleNamespaces){
 	if(nodeFilter){
 		node = nodeFilter(node);
@@ -1022,8 +1035,7 @@ function serializeToString(node,buf,isHTML,nodeFilter,visibleNamespaces){
 			if (needNamespaceDefine(attr,isHTML, visibleNamespaces)) {
 				var prefix = attr.prefix||'';
 				var uri = attr.namespaceURI;
-				var ns = prefix ? ' xmlns:' + prefix : " xmlns";
-				buf.push(ns, '="' , uri , '"');
+				addSerializedAttribute(buf, prefix ? 'xmlns:' + prefix : "xmlns", uri);
 				visibleNamespaces.push({ prefix: prefix, namespace:uri });
 			}
 			serializeToString(attr,buf,isHTML,nodeFilter,visibleNamespaces);
@@ -1032,8 +1044,7 @@ function serializeToString(node,buf,isHTML,nodeFilter,visibleNamespaces){
 		if (needNamespaceDefine(node,isHTML, visibleNamespaces)) {
 			var prefix = node.prefix||'';
 			var uri = node.namespaceURI;
-			var ns = prefix ? ' xmlns:' + prefix : " xmlns";
-			buf.push(ns, '="' , uri , '"');
+			addSerializedAttribute(buf, prefix ? 'xmlns:' + prefix : "xmlns", uri);
 			visibleNamespaces.push({ prefix: prefix, namespace:uri });
 		}
 		
@@ -1072,7 +1083,7 @@ function serializeToString(node,buf,isHTML,nodeFilter,visibleNamespaces){
 		}
 		return;
 	case ATTRIBUTE_NODE:
-		return buf.push(' ',node.name,'="',node.value.replace(/[<&"]/g,_xmlEncoder),'"');
+		return addSerializedAttribute(buf, node.name, node.value);
 	case TEXT_NODE:
 		return buf.push(node.data.replace(/[<&]/g,_xmlEncoder));
 	case CDATA_SECTION_NODE:

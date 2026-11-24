@@ -52,6 +52,7 @@ test/dom/element.js
 test/dom/fragment.js
 test/dom/level3.js
 test/dom/ns-test.js
+test/dom/serializer-attribute-escape.js
 test/dom/serializer.js|<script> element with no children
 test/error/duplicate-attribute.js
 test/error/error.js
