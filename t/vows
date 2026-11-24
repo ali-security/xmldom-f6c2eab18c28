@@ -46,8 +46,10 @@ ln -sfn .. node_modules/xmldom
 node -e "require('xmldom'); require('vows')"
 
 SUITES="
+test/conventions/find.js
 test/dom/attr.js
 test/dom/clone.js
+test/dom/document.js
 test/dom/element.js
 test/dom/fragment.js
 test/dom/level3.js
@@ -63,6 +65,7 @@ test/error/xml-error.js|invalid xml attribute(<>&)
 test/parse/doctype.js
 test/parse/file-test.js
 test/parse/locator.js
+test/parse/multiple-root.js
 test/parse/namespace.js
 test/parse/node.js
 test/parse/parse-element.js

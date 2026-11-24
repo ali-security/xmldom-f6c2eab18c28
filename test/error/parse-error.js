@@ -144,8 +144,11 @@ var batch = {
 			reported.push(msg);
 		};
 		var doc = new DOMParser({domBuilder: domBuilder}).parseFromString('<xml><a/></XML><b/></xml>', 'text/xml');
-		assert.equal(reported.length, 1, JSON.stringify(reported));
+		// `</XML>` closes `<xml>`, so `<b/>` would become a second root element,
+		// which is reported and not added since CVE-2022-39353
+		assert.equal(reported.length, 2, JSON.stringify(reported));
 		assert.ok(/^element parse error: end tag name: XML is not match the current start tagName:xml/.test(reported[0]), reported[0]);
+		assert.ok(/^element parse error: Error: Hierarchy request error: Only one element can be added and only after doctype/.test(reported[1]), reported[1]);
 		assert.equal(doc.documentElement.tagName, 'xml');
 	},
 	'ParseError thrown in errorHandler.fatalError stops parsing': function () {

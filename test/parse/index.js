@@ -1,6 +1,7 @@
 require('./doctype')
 require('./file-test')
 require('./locator')
+require('./multiple-root')
 require('./namespace')
 require('./node')
 require('./parse-element')
