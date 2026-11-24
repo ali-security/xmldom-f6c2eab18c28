@@ -52,6 +52,7 @@ test/dom/element.js
 test/dom/fragment.js
 test/dom/level3.js
 test/dom/ns-test.js
+test/dom/prototype-pollution.js
 test/dom/serializer-attribute-escape.js
 test/dom/serializer.js|<script> element with no children
 test/error/duplicate-attribute.js
@@ -65,6 +66,7 @@ test/parse/locator.js
 test/parse/namespace.js
 test/parse/node.js
 test/parse/parse-element.js
+test/parse/prototype-pollution.js
 test/parse/simple.js|simple
 test/parse/test-doc-witespace.js
 test/parse/unclosedcomment.js
