@@ -72,6 +72,7 @@ test/parse/end-tag-residue.js
 test/parse/file-test.js
 test/parse/locator.js
 test/parse/multiple-root.js
+test/parse/namespace-map-memory.js
 test/parse/namespace.js
 test/parse/node.js
 test/parse/normalize-complexity.js

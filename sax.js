@@ -460,9 +460,13 @@ function appendElement(el,domBuilder,currentNSMap){
 		if(nsPrefix !== false){//hack!!
 			if(localNSMap == null){
 				localNSMap = {}
-				//console.log(currentNSMap,0)
-				_copy(currentNSMap,currentNSMap={})
-				//console.log(currentNSMap,1)
+				// Derive the child scope's namespace map by prototype-chain inheritance
+				// instead of a flat copy: lookups inherit ancestor prefixes transparently,
+				// so a document nesting N scopes retains O(N) map entries rather than
+				// sum(1..N) = O(N^2). localNSMap stays a flat own-only record of the
+				// prefixes declared at THIS element, so own-property enumeration
+				// (endPrefixMapping below) still reports only local declarations.
+				currentNSMap = Object.create(currentNSMap)
 			}
 			//attributes are visited from the last one: a redefined namespace declaration
 			//keeps its last value, as the xmlns attribute does in the DOM

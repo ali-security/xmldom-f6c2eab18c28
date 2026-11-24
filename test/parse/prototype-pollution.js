@@ -55,10 +55,13 @@ vows.describe('prototype pollution (sax)').addBatch({
 		var defaultNSMap = builder.elements[0].currentNSMap;
 		assert.ok(hasOwn.call(defaultNSMap, 'xml'));
 		assert.ok(!hasOwn.call(defaultNSMap, 'polluted'), 'inherited property copied into the default namespace map');
-		// child declares a namespace, so it gets a copy of the parent's namespace map
+		// child declares a namespace, so it gets a map inheriting the parent's namespace map
+		// through the prototype chain, instead of a flat copy (GHSA-965w-775f-mr7g)
 		var childNSMap = builder.elements[1].currentNSMap;
+		assert.ok(hasOwn.call(childNSMap, 'a'));
 		assert.equal(childNSMap.a, 'urn:a');
-		assert.ok(hasOwn.call(childNSMap, 'xml'));
+		assert.strictEqual(Object.getPrototypeOf(childNSMap), defaultNSMap);
+		assert.equal(childNSMap.xml, 'http://www.w3.org/XML/1998/namespace');
 		assert.ok(!hasOwn.call(childNSMap, 'polluted'), 'inherited property copied into the element namespace map');
 	}
 }).run();
