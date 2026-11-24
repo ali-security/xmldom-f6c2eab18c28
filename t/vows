@@ -66,6 +66,7 @@ test/error/error.js
 test/error/parse-error.js
 test/error/reported-levels.js
 test/error/xml-error.js|invalid xml attribute(<>&)
+test/parse/attribute-complexity.js
 test/parse/doctype.js
 test/parse/end-tag-residue.js
 test/parse/file-test.js

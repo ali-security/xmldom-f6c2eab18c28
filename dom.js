@@ -196,6 +196,13 @@ _extends(LiveNodeList,NodeList);
  * used for attributes or DocumentType entities 
  */
 function NamedNodeMap() {
+	// nodeName -> Attr membership index; lets the parse-time de-duplication in
+	// setNamedItem resolve an existing attribute in O(1) instead of scanning the
+	// list, so building an element with M attributes costs O(M) rather than O(M^2).
+	// The numbered entries and length remain the sole authority for attribute order.
+	// Keys are prefixed (see _nnmIndexKey) and only read as own properties, so an
+	// attribute named __proto__ or constructor is an ordinary key.
+	this._nameIndex = {};
 };
 
 function _findNodeIndex(list,node){
@@ -205,11 +212,48 @@ function _findNodeIndex(list,node){
 	}
 }
 
+// '@' + nodeName: no key can be `__proto__` (special on every object, including
+// null-prototype ones, in pre-ES2015 engines such as the V8 of node 0.10) or the
+// name of an Object.prototype member.
+function _nnmIndexKey(name) {
+	return '@' + name;
+}
+function _nnmIndexGet(list, name) {
+	var key = _nnmIndexKey(name);
+	if (Object.prototype.hasOwnProperty.call(list._nameIndex, key)) {
+		return list._nameIndex[key];
+	}
+}
+function _nnmIndexAdd(list, attr) {
+	list._nameIndex[_nnmIndexKey(attr.nodeName)] = attr;
+}
+function _nnmIndexRemove(list, attr) {
+	// Only drop the entry if it still points at this attribute; a replacement with
+	// a different nodeName may already have re-keyed it.
+	if (_nnmIndexGet(list, attr.nodeName) === attr) {
+		delete list._nameIndex[_nnmIndexKey(attr.nodeName)];
+		// setNamedItemNS can leave two attributes with the same nodeName (same
+		// qualified name, different namespaceURI): keep indexing the one still in the
+		// list, so setNamedItem keeps replacing it instead of adding a duplicate.
+		// Only reached on removal/replacement, which already scan the list.
+		var other = list.getNamedItem(attr.nodeName);
+		if (other) {
+			_nnmIndexAdd(list, other);
+		}
+	}
+}
+
 function _addNamedNode(el,list,newAttr,oldAttr){
 	if(oldAttr){
 		list[_findNodeIndex(list,oldAttr)] = newAttr;
 	}else{
 		list[list.length++] = newAttr;
+	}
+	_nnmIndexAdd(list, newAttr);
+	if(oldAttr){
+		// oldAttr leaves the list; drop its index entry (its nodeName may differ
+		// from newAttr's when the replacement came via setNamedItemNS).
+		_nnmIndexRemove(list, oldAttr);
 	}
 	if(el){
 		newAttr.ownerElement = el;
@@ -229,6 +273,7 @@ function _removeNamedNode(el,list,attr){
 			list[i] = list[++i]
 		}
 		list.length = lastIndex;
+		_nnmIndexRemove(list, attr);
 		if(el){
 			var doc = el.ownerDocument;
 			if(doc){
@@ -262,7 +307,11 @@ NamedNodeMap.prototype = {
 		if(el && el!=this._ownerElement){
 			throw new DOMException(INUSE_ATTRIBUTE_ERR);
 		}
-		var oldAttr = this.getNamedItem(attr.nodeName);
+		// Resolve any existing attribute with the same nodeName through the O(1)
+		// membership index rather than an O(M) scan — this is the parse-dedup hot
+		// path (setAttributeNode per attribute during parse). Absent -> undefined,
+		// matching getNamedItem's contract.
+		var oldAttr = _nnmIndexGet(this, attr.nodeName);
 		_addNamedNode(this._ownerElement,this,attr,oldAttr);
 		return oldAttr;
 	},
