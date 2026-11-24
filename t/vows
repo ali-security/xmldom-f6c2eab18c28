@@ -50,6 +50,7 @@ test/conventions/find.js
 test/dom/attr.js
 test/dom/cdata-section.js
 test/dom/clone.js
+test/dom/deep-tree.js
 test/dom/document.js
 test/dom/element.js
 test/dom/fragment.js
@@ -58,6 +59,7 @@ test/dom/ns-test.js
 test/dom/prototype-pollution.js
 test/dom/serializer-attribute-escape.js
 test/dom/serializer.js|<script> element with no children
+test/dom/walk-dom.js
 test/error/duplicate-attribute.js
 test/error/error.js
 test/error/parse-error.js

@@ -401,17 +401,26 @@ Node.prototype = {
 	},
 	// Modified in DOM Level 2:
 	normalize:function(){
-		var child = this.firstChild;
-		while(child){
-			var next = child.nextSibling;
-			if(next && next.nodeType == TEXT_NODE && child.nodeType == TEXT_NODE){
-				this.removeChild(next);
-				child.appendData(next.data);
-			}else{
-				child.normalize();
-				child = next;
+		// Iterative traversal via walkDOM to avoid stack overflow on deeply nested trees
+		// (GHSA-2v35-w6hq-6mfw). walkDOM reads lastChild/previousSibling after enter returns,
+		// so it descends into the children that survive the merge, which is what the
+		// recursive child.normalize() did.
+		walkDOM(this, null, {
+			enter:function(node){
+				// Merge adjacent text children of node before walkDOM schedules them.
+				var child = node.firstChild;
+				while(child){
+					var next = child.nextSibling;
+					if(next && next.nodeType == TEXT_NODE && child.nodeType == TEXT_NODE){
+						node.removeChild(next);
+						child.appendData(next.data);
+					}else{
+						child = next;
+					}
+				}
+				return true; // descend into surviving children
 			}
-		}
+		});
 	},
   	// Introduced in DOM Level 2:
 	isSupported:function(feature, version){
@@ -477,15 +486,103 @@ copy(NodeType,Node.prototype);
  * @return boolean true: break visit;
  */
 function _visitNode(node,callback){
-	if(callback(node)){
-		return true;
-	}
-	if(node = node.firstChild){
-		do{
-			if(_visitNode(node,callback)){return true}
-        }while(node=node.nextSibling)
-    }
+	// Iterative traversal via walkDOM to avoid stack overflow on deeply nested trees
+	// (GHSA-2v35-w6hq-6mfw).
+	return walkDOM(node, null, {
+		enter: function(n){
+			return callback(n) ? walkDOM.STOP : true;
+		}
+	}) === walkDOM.STOP;
 }
+
+/**
+ * Depth-first pre/post-order DOM tree walker.
+ *
+ * Visits every node in the subtree rooted at `node`. For each node:
+ *
+ * 1. Calls `callbacks.enter(node, context)` before descending into the node's children. The
+ * return value becomes the `context` passed to each child's `enter` call and to the matching
+ * `exit` call.
+ * 2. If `enter` returns `null` or `undefined`, the node's children are skipped;
+ * sibling traversal continues normally.
+ * 3. If `enter` returns `walkDOM.STOP`, the entire traversal is aborted immediately — no
+ * further `enter` or `exit` calls are made.
+ * 4. `lastChild` and `previousSibling` are read **after** `enter` returns, so `enter` may
+ * safely modify the node's own child list before the walker descends. Modifying siblings of
+ * the current node or any other part of the tree produces unpredictable results: nodes already
+ * queued on the stack are visited regardless of DOM changes, and newly inserted nodes outside
+ * the current child list are never visited.
+ * 5. Calls `callbacks.exit(node, context)` (if provided) after all of a node's children have
+ * been visited, passing the same `context` that `enter`
+ * returned for that node.
+ *
+ * This implementation uses an explicit stack and does not recurse — it is safe on arbitrarily
+ * deep trees.
+ *
+ * @param {Node} node
+ * Root of the subtree to walk.
+ * @param {*} context
+ * Initial context value passed to the root node's `enter`.
+ * @param {{ enter: function(Node, *): *, exit?: function(Node, *): void }} callbacks
+ * @returns {void | walkDOM.STOP}
+ * @see https://github.com/xmldom/xmldom/security/advisories/GHSA-2v35-w6hq-6mfw
+ */
+function walkDOM(node, context, callbacks) {
+	// Each stack frame is {node, context, phase}:
+	//   walkDOM.ENTER — call enter, then push children
+	//   walkDOM.EXIT  — call exit
+	var stack = [{ node: node, context: context, phase: walkDOM.ENTER }];
+	while (stack.length > 0) {
+		var frame = stack.pop();
+		if (frame.phase === walkDOM.ENTER) {
+			var childContext = callbacks.enter(frame.node, frame.context);
+			if (childContext === walkDOM.STOP) {
+				return walkDOM.STOP;
+			}
+			// Push exit frame before children so it fires after all children are processed (Last In First Out)
+			stack.push({ node: frame.node, context: childContext, phase: walkDOM.EXIT });
+			if (childContext === null || childContext === undefined) {
+				continue; // skip children
+			}
+			// lastChild is read after enter returns, so enter may modify the child list.
+			var child = frame.node.lastChild;
+			// Traverse from lastChild backwards so that pushing onto the stack
+			// naturally yields firstChild on top (processed first).
+			while (child) {
+				stack.push({ node: child, context: childContext, phase: walkDOM.ENTER });
+				child = child.previousSibling;
+			}
+		} else {
+			// frame.phase === walkDOM.EXIT
+			if (callbacks.exit) {
+				callbacks.exit(frame.node, frame.context);
+			}
+		}
+	}
+}
+
+/**
+ * Sentinel value returned from a `walkDOM` `enter` callback to abort the entire traversal
+ * immediately.
+ * A unique plain object is used, since `Symbol` is not available in every supported runtime.
+ *
+ * @type {Object}
+ */
+walkDOM.STOP = {};
+/**
+ * Phase constant for a stack frame that has not yet been visited.
+ * The `enter` callback is called and children are scheduled.
+ *
+ * @type {number}
+ */
+walkDOM.ENTER = 0;
+/**
+ * Phase constant for a stack frame whose subtree has been fully visited.
+ * The `exit` callback is called.
+ *
+ * @type {number}
+ */
+walkDOM.EXIT = 1;
 
 
 
@@ -1397,227 +1494,295 @@ function addSerializedAttribute(buf, qualifiedName, value) {
 var InvalidChar = /[\x00-\x08\x0B\x0C\x0E-\x1F\uFFFE\uFFFF]|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?:^|[^\uD800-\uDBFF])[\uDC00-\uDFFF]/;
 
 function serializeToString(node,buf,isHTML,nodeFilter,visibleNamespaces,requireWellFormed){
-	if(nodeFilter){
-		node = nodeFilter(node);
-		if(node){
-			if(typeof node == 'string'){
-				buf.push(node);
-				return;
-			}
-		}else{
-			return;
+	// Iterative traversal with an explicit stack to avoid stack overflow on deeply nested trees
+	// (GHSA-2v35-w6hq-6mfw). Each frame carries the isHTML and visibleNamespaces values the
+	// recursive call used to receive; a frame with `closeTag` writes the end tag of an element
+	// once all of its children have been serialized.
+	var stack = [{ node: node, isHTML: isHTML, visibleNamespaces: visibleNamespaces }];
+	while(stack.length > 0){
+		var frame = stack.pop();
+		if('closeTag' in frame){
+			buf.push('</',frame.closeTag,'>');
+			continue;
 		}
-		//buf.sort.apply(attrs, attributeSorter);
-	}
-	switch(node.nodeType){
-	case ELEMENT_NODE:
-		if (!visibleNamespaces) visibleNamespaces = [];
-		var startVisibleNamespaces = visibleNamespaces.length;
-		var attrs = node.attributes;
-		var len = attrs.length;
-		var child = node.firstChild;
-		var nodeName = node.tagName;
-		
-		isHTML =  (htmlns === node.namespaceURI) ||isHTML 
-		buf.push('<',nodeName);
-		
-		
-		
-		for(var i=0;i<len;i++){
-			// add namespaces for attributes
-			var attr = attrs.item(i);
-			if (attr.prefix == 'xmlns') {
-				visibleNamespaces.push({ prefix: attr.localName, namespace: attr.value });
-			}else if(attr.nodeName == 'xmlns'){
-				visibleNamespaces.push({ prefix: '', namespace: attr.value });
-			}
+		node = frame.node;
+		isHTML = frame.isHTML;
+		visibleNamespaces = frame.visibleNamespaces;
+		//if is cdata child node of a html script element
+		if(frame.inScript && node.data){
+			buf.push(node.data);
+			continue;
 		}
-		for(var i=0;i<len;i++){
-			var attr = attrs.item(i);
-			if (needNamespaceDefine(attr,isHTML, visibleNamespaces)) {
-				var prefix = attr.prefix||'';
-				var uri = attr.namespaceURI;
+		if(nodeFilter){
+			node = nodeFilter(node);
+			if(node){
+				if(typeof node == 'string'){
+					buf.push(node);
+					continue;
+				}
+			}else{
+				continue;
+			}
+			//buf.sort.apply(attrs, attributeSorter);
+		}
+		switch(node.nodeType){
+		case ELEMENT_NODE:
+			if (!visibleNamespaces) visibleNamespaces = [];
+			var startVisibleNamespaces = visibleNamespaces.length;
+			var attrs = node.attributes;
+			var len = attrs.length;
+			var child = node.firstChild;
+			var nodeName = node.tagName;
+
+			isHTML =  (htmlns === node.namespaceURI) ||isHTML
+			buf.push('<',nodeName);
+
+
+
+			for(var i=0;i<len;i++){
+				// add namespaces for attributes
+				var attr = attrs.item(i);
+				if (attr.prefix == 'xmlns') {
+					visibleNamespaces.push({ prefix: attr.localName, namespace: attr.value });
+				}else if(attr.nodeName == 'xmlns'){
+					visibleNamespaces.push({ prefix: '', namespace: attr.value });
+				}
+			}
+			for(var i=0;i<len;i++){
+				var attr = attrs.item(i);
+				if (needNamespaceDefine(attr,isHTML, visibleNamespaces)) {
+					var prefix = attr.prefix||'';
+					var uri = attr.namespaceURI;
+					addSerializedAttribute(buf, prefix ? 'xmlns:' + prefix : "xmlns", uri);
+					visibleNamespaces.push({ prefix: prefix, namespace:uri });
+				}
+				// attributes have no children, so this call does not nest any further
+				serializeToString(attr,buf,isHTML,nodeFilter,visibleNamespaces,requireWellFormed);
+			}
+			// add namespace for current node
+			if (needNamespaceDefine(node,isHTML, visibleNamespaces)) {
+				var prefix = node.prefix||'';
+				var uri = node.namespaceURI;
 				addSerializedAttribute(buf, prefix ? 'xmlns:' + prefix : "xmlns", uri);
 				visibleNamespaces.push({ prefix: prefix, namespace:uri });
 			}
-			serializeToString(attr,buf,isHTML,nodeFilter,visibleNamespaces,requireWellFormed);
-		}
-		// add namespace for current node		
-		if (needNamespaceDefine(node,isHTML, visibleNamespaces)) {
-			var prefix = node.prefix||'';
-			var uri = node.namespaceURI;
-			addSerializedAttribute(buf, prefix ? 'xmlns:' + prefix : "xmlns", uri);
-			visibleNamespaces.push({ prefix: prefix, namespace:uri });
-		}
-		
-		if(child || isHTML && !/^(?:meta|link|img|br|hr|input)$/i.test(nodeName)){
-			buf.push('>');
-			//if is cdata child node
-			if(isHTML && /^script$/i.test(nodeName)){
-				while(child){
-					if(child.data){
-						buf.push(child.data);
-					}else{
-						serializeToString(child,buf,isHTML,nodeFilter,visibleNamespaces,requireWellFormed);
-					}
-					child = child.nextSibling;
+
+			if(child || isHTML && !/^(?:meta|link|img|br|hr|input)$/i.test(nodeName)){
+				buf.push('>');
+				// the end tag is written after all children (Last In First Out)
+				stack.push({ closeTag: nodeName });
+				//if is cdata child node
+				_pushChildFrames(stack, node, isHTML, visibleNamespaces, isHTML && /^script$/i.test(nodeName));
+			}else{
+				buf.push('/>');
+			}
+			// remove added visible namespaces
+			//visibleNamespaces.length = startVisibleNamespaces;
+			break;
+		case DOCUMENT_NODE:
+		case DOCUMENT_FRAGMENT_NODE:
+			_pushChildFrames(stack, node, isHTML, visibleNamespaces, false);
+			break;
+		case ATTRIBUTE_NODE:
+			addSerializedAttribute(buf, node.name, node.value);
+			break;
+		case TEXT_NODE:
+			buf.push(node.data.replace(/[<&]/g,_xmlEncoder));
+			break;
+		case CDATA_SECTION_NODE:
+			if (requireWellFormed && node.data.indexOf(']]>') !== -1) {
+				throw new DOMException(INVALID_STATE_ERR, 'The CDATASection data contains "]]>"');
+			}
+			buf.push('<![CDATA[', node.data.replace(/]]>/g, ']]]]><![CDATA[>'), ']]>');
+			break;
+		case COMMENT_NODE:
+			if (requireWellFormed) {
+				if (InvalidChar.test(node.data)) {
+					throw new DOMException(INVALID_STATE_ERR, 'The comment node data contains characters outside the XML Char production');
 				}
-			}else
-			{
-				while(child){
-					serializeToString(child,buf,isHTML,nodeFilter,visibleNamespaces,requireWellFormed);
-					child = child.nextSibling;
+				if (node.data.indexOf('--') !== -1 || node.data[node.data.length - 1] === '-') {
+					throw new DOMException(INVALID_STATE_ERR, 'The comment node data contains "--" or ends with "-"');
 				}
 			}
-			buf.push('</',nodeName,'>');
-		}else{
-			buf.push('/>');
-		}
-		// remove added visible namespaces
-		//visibleNamespaces.length = startVisibleNamespaces;
-		return;
-	case DOCUMENT_NODE:
-	case DOCUMENT_FRAGMENT_NODE:
-		var child = node.firstChild;
-		while(child){
-			serializeToString(child,buf,isHTML,nodeFilter,visibleNamespaces,requireWellFormed);
-			child = child.nextSibling;
-		}
-		return;
-	case ATTRIBUTE_NODE:
-		return addSerializedAttribute(buf, node.name, node.value);
-	case TEXT_NODE:
-		return buf.push(node.data.replace(/[<&]/g,_xmlEncoder));
-	case CDATA_SECTION_NODE:
-		if (requireWellFormed && node.data.indexOf(']]>') !== -1) {
-			throw new DOMException(INVALID_STATE_ERR, 'The CDATASection data contains "]]>"');
-		}
-		return buf.push( '<![CDATA[',node.data.replace(/]]>/g, ']]]]><![CDATA[>'),']]>');
-	case COMMENT_NODE:
-		if (requireWellFormed) {
-			if (InvalidChar.test(node.data)) {
-				throw new DOMException(INVALID_STATE_ERR, 'The comment node data contains characters outside the XML Char production');
+			buf.push( "<!--",node.data,"-->");
+			break;
+		case DOCUMENT_TYPE_NODE:
+			var pubid = node.publicId;
+			var sysid = node.systemId;
+			buf.push('<!DOCTYPE ',node.name);
+			if(pubid){
+				buf.push(' PUBLIC ', _quoteDoctypeId(pubid));
+				if (sysid && sysid!='.') {
+					buf.push(' ', _quoteDoctypeId(sysid));
+				}
+				buf.push('>');
+			}else if(sysid && sysid!='.'){
+				buf.push(' SYSTEM ', _quoteDoctypeId(sysid), '>');
+			}else{
+				var sub = node.internalSubset;
+				if(sub){
+					buf.push(" [",sub,"]");
+				}
+				buf.push(">");
 			}
-			if (node.data.indexOf('--') !== -1 || node.data[node.data.length - 1] === '-') {
-				throw new DOMException(INVALID_STATE_ERR, 'The comment node data contains "--" or ends with "-"');
-			}
+			break;
+		case PROCESSING_INSTRUCTION_NODE:
+			buf.push( "<?",node.target," ",node.data,"?>");
+			break;
+		case ENTITY_REFERENCE_NODE:
+			buf.push( '&',node.nodeName,';');
+			break;
+		//case ENTITY_NODE:
+		//case NOTATION_NODE:
+		default:
+			buf.push('??',node.nodeName);
 		}
-		return buf.push( "<!--",node.data,"-->");
-	case DOCUMENT_TYPE_NODE:
-		var pubid = node.publicId;
-		var sysid = node.systemId;
-		buf.push('<!DOCTYPE ',node.name);
-		if(pubid){
-			buf.push(' PUBLIC ', _quoteDoctypeId(pubid));
-			if (sysid && sysid!='.') {
-				buf.push(' ', _quoteDoctypeId(sysid));
-			}
-			buf.push('>');
-		}else if(sysid && sysid!='.'){
-			buf.push(' SYSTEM ', _quoteDoctypeId(sysid), '>');
-		}else{
-			var sub = node.internalSubset;
-			if(sub){
-				buf.push(" [",sub,"]");
-			}
-			buf.push(">");
-		}
-		return;
-	case PROCESSING_INSTRUCTION_NODE:
-		return buf.push( "<?",node.target," ",node.data,"?>");
-	case ENTITY_REFERENCE_NODE:
-		return buf.push( '&',node.nodeName,';');
-	//case ENTITY_NODE:
-	//case NOTATION_NODE:
-	default:
-		buf.push('??',node.nodeName);
 	}
 }
+/**
+ * Schedules the children of `node` for serialization by `serializeToString`.
+ * They are pushed from `lastChild` backwards, so `firstChild` ends up on top of the stack
+ * and the children are serialized in document order.
+ *
+ * @param {Array} stack the serializeToString work stack
+ * @param {Node} node the node whose children are scheduled
+ * @param {boolean} isHTML
+ * @param {Array} visibleNamespaces
+ * @param {boolean} inScript `true` when `node` is a html script element, whose children
+ * with data are written as is
+ */
+function _pushChildFrames(stack, node, isHTML, visibleNamespaces, inScript){
+	var child = node.lastChild;
+	while(child){
+		stack.push({ node: child, isHTML: isHTML, visibleNamespaces: visibleNamespaces, inScript: inScript });
+		child = child.previousSibling;
+	}
+}
+/**
+ * Imports a node from a different document into `doc`, creating a new copy.
+ * Delegates to {@link walkDOM} for traversal, to avoid stack overflow on deeply nested trees
+ * (GHSA-2v35-w6hq-6mfw). Each node in the subtree is shallow-cloned, stamped with `doc` as its
+ * `ownerDocument`, and detached (`parentNode` set to `null`).
+ * Children are imported when `deep` is `true`; for {@link Attr} nodes `deep` is always forced
+ * to `true`.
+ *
+ * @param {Document} doc
+ * The document that will own the imported node.
+ * @param {Node} node
+ * The node to import.
+ * @param {boolean} deep
+ * If `true`, descendants are imported as well.
+ * @returns {Node}
+ * The newly imported node, now owned by `doc`.
+ */
 function importNode(doc,node,deep){
-	var node2;
-	switch (node.nodeType) {
-	case ELEMENT_NODE:
-		node2 = node.cloneNode(false);
-		node2.ownerDocument = doc;
-		//var attrs = node2.attributes;
-		//var len = attrs.length;
-		//for(var i=0;i<len;i++){
-			//node2.setAttributeNodeNS(importNode(doc,attrs.item(i),deep));
-		//}
-	case DOCUMENT_FRAGMENT_NODE:
-		break;
-	case ATTRIBUTE_NODE:
-		deep = true;
-		break;
-	//case ENTITY_REFERENCE_NODE:
-	//case PROCESSING_INSTRUCTION_NODE:
-	////case TEXT_NODE:
-	//case CDATA_SECTION_NODE:
-	//case COMMENT_NODE:
-	//	deep = false;
-	//	break;
-	//case DOCUMENT_NODE:
-	//case DOCUMENT_TYPE_NODE:
-	//cannot be imported.
-	//case ENTITY_NODE:
-	//case NOTATION_NODE：
-	//can not hit in level3
-	//default:throw e;
-	}
-	if(!node2){
-		node2 = node.cloneNode(false);//false
-	}
-	node2.ownerDocument = doc;
-	node2.parentNode = null;
-	if(deep){
-		var child = node.firstChild;
-		while(child){
-			node2.appendChild(importNode(doc,child,deep));
-			child = child.nextSibling;
+	var destRoot;
+	walkDOM(node, null, {
+		enter: function(srcNode, destParent){
+			var node2;
+			var shouldDeep = deep;
+			switch (srcNode.nodeType) {
+			case ELEMENT_NODE:
+				node2 = srcNode.cloneNode(false);
+				node2.ownerDocument = doc;
+				//var attrs = node2.attributes;
+				//var len = attrs.length;
+				//for(var i=0;i<len;i++){
+					//node2.setAttributeNodeNS(importNode(doc,attrs.item(i),deep));
+				//}
+			case DOCUMENT_FRAGMENT_NODE:
+				break;
+			case ATTRIBUTE_NODE:
+				shouldDeep = true;
+				break;
+			//case ENTITY_REFERENCE_NODE:
+			//case PROCESSING_INSTRUCTION_NODE:
+			////case TEXT_NODE:
+			//case CDATA_SECTION_NODE:
+			//case COMMENT_NODE:
+			//	deep = false;
+			//	break;
+			//case DOCUMENT_NODE:
+			//case DOCUMENT_TYPE_NODE:
+			//cannot be imported.
+			//case ENTITY_NODE:
+			//case NOTATION_NODE：
+			//can not hit in level3
+			//default:throw e;
+			}
+			if(!node2){
+				node2 = srcNode.cloneNode(false);//false
+			}
+			node2.ownerDocument = doc;
+			node2.parentNode = null;
+			// capture as the root of the imported subtree or attach to parent.
+			if(destParent === null){
+				destRoot = node2;
+			}else{
+				destParent.appendChild(node2);
+			}
+			// Return node2 as the context for children (causes walkDOM to descend),
+			// or null to skip children (shallow import).
+			return shouldDeep ? node2 : null;
 		}
-	}
-	return node2;
+	});
+	return destRoot;
 }
 //
 //var _relationMap = {firstChild:1,lastChild:1,previousSibling:1,nextSibling:1,
 //					attributes:1,childNodes:1,parentNode:1,documentElement:1,doctype,};
 function cloneNode(doc,node,deep){
-	var node2 = new node.constructor();
-	for (var n in node) {
-		if (Object.prototype.hasOwnProperty.call(node, n)) {
-			var v = node[n];
-			if (typeof v != "object") {
-				if (v != node2[n]) {
-					node2[n] = v;
+	// Iterative traversal via walkDOM to avoid stack overflow on deeply nested trees
+	// (GHSA-2v35-w6hq-6mfw).
+	var destRoot;
+	walkDOM(node, null, {
+		enter: function(srcNode, destParent){
+			// 1. Create a blank node of the same type and copy all scalar own properties.
+			var node2 = new srcNode.constructor();
+			for (var n in srcNode) {
+				if (Object.prototype.hasOwnProperty.call(srcNode, n)) {
+					var v = srcNode[n];
+					if (typeof v != "object") {
+						if (v != node2[n]) {
+							node2[n] = v;
+						}
+					}
 				}
 			}
+			if(srcNode.childNodes){
+				node2.childNodes = new NodeList();
+			}
+			node2.ownerDocument = doc;
+			// 2. Handle node-type-specific setup.
+			//    Attributes are not DOM children, so they are cloned inline here
+			//    rather than by walkDOM descent.
+			//    ATTRIBUTE_NODE forces deep=true so its own children are walked.
+			var shouldDeep = deep;
+			switch (node2.nodeType) {
+			case ELEMENT_NODE:
+				var attrs	= srcNode.attributes;
+				var attrs2	= node2.attributes = new NamedNodeMap();
+				var len = attrs.length
+				attrs2._ownerElement = node2;
+				for(var i=0;i<len;i++){
+					node2.setAttributeNode(cloneNode(doc,attrs.item(i),true));
+				}
+				break;;
+			case ATTRIBUTE_NODE:
+				shouldDeep = true;
+			}
+			// 3. Attach to parent, or capture as the root of the cloned subtree.
+			if(destParent !== null){
+				destParent.appendChild(node2);
+			}else{
+				destRoot = node2;
+			}
+			// 4. Return node2 as the context for children (causes walkDOM to descend),
+			//    or null to skip children (shallow clone).
+			return shouldDeep ? node2 : null;
 		}
-	}
-	if(node.childNodes){
-		node2.childNodes = new NodeList();
-	}
-	node2.ownerDocument = doc;
-	switch (node2.nodeType) {
-	case ELEMENT_NODE:
-		var attrs	= node.attributes;
-		var attrs2	= node2.attributes = new NamedNodeMap();
-		var len = attrs.length
-		attrs2._ownerElement = node2;
-		for(var i=0;i<len;i++){
-			node2.setAttributeNode(cloneNode(doc,attrs.item(i),true));
-		}
-		break;;
-	case ATTRIBUTE_NODE:
-		deep = true;
-	}
-	if(deep){
-		var child = node.firstChild;
-		while(child){
-			node2.appendChild(cloneNode(doc,child,deep));
-			child = child.nextSibling;
-		}
-	}
-	return node2;
+	});
+	return destRoot;
 }
 
 function __set__(object,key,value){
@@ -1660,14 +1825,20 @@ try{
 			switch(node.nodeType){
 			case ELEMENT_NODE:
 			case DOCUMENT_FRAGMENT_NODE:
+				// Iterative traversal via walkDOM to avoid stack overflow on deeply nested trees
+				// (GHSA-2v35-w6hq-6mfw).
 				var buf = [];
-				node = node.firstChild;
-				while(node){
-					if(node.nodeType!==7 && node.nodeType !==8){
-						buf.push(getTextContent(node));
+				walkDOM(node, null, {
+					enter: function(n){
+						if(n.nodeType === ELEMENT_NODE || n.nodeType === DOCUMENT_FRAGMENT_NODE){
+							return true; // enter children
+						}
+						if(n.nodeType === PROCESSING_INSTRUCTION_NODE || n.nodeType === COMMENT_NODE){
+							return null; // excluded from text content
+						}
+						buf.push(n.nodeValue);
 					}
-					node = node.nextSibling;
-				}
+				});
 				return buf.join('');
 			default:
 				return node.nodeValue;
@@ -1687,4 +1858,6 @@ try{
 	exports.DOMException = DOMException;
 	// test-only: exposes the private `find` ponyfill to test/conventions/find.js
 	exports.__find = find;
+	// test-only: exposes the private iterative `walkDOM` traversal to test/dom/walk-dom.js
+	exports.__walkDOM = walkDOM;
 //}
